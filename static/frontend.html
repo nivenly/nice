@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DID Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            const generateButton = document.getElementById("generate-button");
+            const clearButton = document.getElementById("clear-button");
+            const signButton = document.getElementById("sign-button");
+            const didDisplay = document.getElementById("did-display");
+            const privateKeyDisplay = document.getElementById("private-key-display");
+            const targetDIDInput = document.getElementById("target-did");
+            const attributeNameInput = document.getElementById("attribute-name");
+            const attributeValueInput = document.getElementById("attribute-value");
+            const signatureDisplay = document.getElementById("signature-display");
+
+            // Load DID and private key from storage
+            const loadStorage = () => {
+                const storedDID = localStorage.getItem("did") || sessionStorage.getItem("did");
+                const storedPrivateKey = localStorage.getItem("privateKey") || sessionStorage.getItem("privateKey");
+
+                if (storedDID && storedPrivateKey) {
+                    didDisplay.value = storedDID;
+                    privateKeyDisplay.value = storedPrivateKey;
+
+                    generateButton.disabled = true;
+                } else {
+                    generateButton.disabled = false;
+                }
+            };
+
+            // Clear storage and reset UI
+            const clearStorage = () => {
+                localStorage.removeItem("did");
+                localStorage.removeItem("privateKey");
+                sessionStorage.removeItem("did");
+                sessionStorage.removeItem("privateKey");
+                didDisplay.value = "";
+                privateKeyDisplay.value = "";
+                targetDIDInput.value = "";
+                attributeNameInput.value = "";
+                attributeValueInput.value = "";
+                signatureDisplay.value = "";
+                generateButton.disabled = false;
+            };
+
+            // Generate DID
+            const generateDID = async () => {
+                try {
+                    const response = await fetch("/dids", {
+                        method: "POST",
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Failed to generate DID: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+
+                    if (data.did && data.private_key) {
+                        sessionStorage.setItem("did", data.did);
+                        sessionStorage.setItem("privateKey", data.private_key);
+                        localStorage.setItem("did", data.did);
+                        localStorage.setItem("privateKey", data.private_key);
+
+                        didDisplay.value = data.did;
+                        privateKeyDisplay.value = data.private_key;
+                        generateButton.disabled = true;
+
+                        alert("DID generated successfully!");
+                    } else {
+                        alert("Invalid response format.");
+                    }
+                } catch (error) {
+                    console.error("Error generating DID:", error);
+                    alert("Failed to generate DID.");
+                }
+            };
+
+            // Sign Attribute
+            const signAttribute = async () => {
+                const did = didDisplay.value; // Signing DID
+                const targetDID = targetDIDInput.value; // Target DID
+                const attributeName = attributeNameInput.value;
+                const attributeValue = attributeValueInput.value;
+
+                if (!did || !targetDID || !attributeName || !attributeValue) {
+                    alert("Please fill in all fields.");
+                    return;
+                }
+
+                try {
+                    const response = await fetch("/attributes/sign", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            did: did,
+                            target_did: targetDID,
+                            attribute: attributeName,
+                            attribute_val: attributeValue,
+                        }),
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Failed to sign attribute: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+                    signatureDisplay.value = data.signature;
+                    alert(`Attribute signed successfully:\nSignature: ${data.signature}`);
+                } catch (error) {
+                    console.error("Error signing attribute:", error);
+                    alert("Failed to sign attribute.");
+                }
+            };
+
+            // Event listeners
+            generateButton.addEventListener("click", generateDID);
+            clearButton.addEventListener("click", clearStorage);
+            signButton.addEventListener("click", signAttribute);
+
+            // Load storage on page load
+            loadStorage();
+        });
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+    <div class="max-w-4xl mx-auto mt-10 p-6 bg-white rounded-lg shadow-lg">
+        <h1 class="text-2xl font-bold mb-4">DID Manager</h1>
+
+        <!-- Generate DID Section -->
+        <div class="mb-6">
+            <h2 class="text-xl font-semibold mb-2">Create DID</h2>
+            <div class="flex items-center gap-4 mb-4">
+                <button id="generate-button" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 disabled:opacity-50">Generate DID</button>
+                <button id="clear-button" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Clear</button>
+            </div>
+            <label class="block text-gray-700">DID:</label>
+            <input id="did-display" type="text" class="w-full p-2 border rounded bg-gray-100" readonly />
+
+            <label class="block text-gray-700 mt-4">Private Key:</label>
+            <input id="private-key-display" type="text" class="w-full p-2 border rounded bg-gray-100" readonly />
+        </div>
+
+        <!-- Sign Attribute Section -->
+        <div>
+            <h2 class="text-xl font-semibold mb-2">Sign Attribute</h2>
+            <label class="block text-gray-700">Target DID:</label>
+            <input id="target-did" type="text" class="w-full p-2 border rounded" placeholder="Enter target DID" />
+
+            <label class="block text-gray-700 mt-4">Attribute Name:</label>
+            <input id="attribute-name" type="text" class="w-full p-2 border rounded" placeholder="Enter attribute name" />
+
+            <label class="block text-gray-700 mt-4">Attribute Value:</label>
+            <input id="attribute-value" type="text" class="w-full p-2 border rounded" placeholder="Enter attribute value" />
+
+            <button id="sign-button" class="bg-green-500 text-white px-4 py-2 mt-4 rounded hover:bg-green-600">Sign Attribute</button>
+
+            <label class="block text-gray-700 mt-4">Signature:</label>
+            <textarea id="signature-display" class="w-full p-2 border rounded bg-gray-100" rows="3" readonly></textarea>
+        </div>
+    </div>
+</body>
+</html>

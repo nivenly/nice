@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DID List</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", async () => {
+            const didList = document.getElementById("did-list");
+
+            try {
+                const response = await fetch("/dids");
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch DIDs: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                for (const [did, details] of Object.entries(data)) {
+                    const didItem = document.createElement("div");
+                    didItem.className = "p-4 mb-4 border rounded bg-gray-100";
+
+                    const publicKey = details.public_key;
+                    const attributes = details.attributes || [];
+
+                    didItem.innerHTML = `
+                        <h3 class="text-lg font-bold">${did}</h3>
+                        <p><strong>Public Key:</strong> ${publicKey}</p>
+                        <h4 class="mt-2 font-semibold">Attributes:</h4>
+                        <ul class="mt-2">
+                            ${attributes
+                                .map(attr => `
+                                    <li class="mb-2">
+                                        <strong>${attr.name}:</strong> ${attr.value}<br>
+                                        <em>Signed By:</em> ${attr.signed_by}<br>
+                                        <em>Signature:</em> ${attr.signature}<br>
+                                        <em>Created At:</em> ${attr.created_at}
+                                    </li>
+                                `)
+                                .join("")}
+                        </ul>
+                    `;
+
+                    didList.appendChild(didItem);
+                }
+            } catch (error) {
+                console.error("Error fetching DIDs:", error);
+                didList.innerHTML = `<p class="text-red-500">Failed to load DIDs.</p>`;
+            }
+        });
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+    <div class="max-w-4xl mx-auto mt-10 p-6 bg-white rounded-lg shadow-lg">
+        <h1 class="text-2xl font-bold mb-4">DID List</h1>
+        <div id="did-list">
+            <p>Loading DIDs...</p>
+        </div>
+    </div>
+</body>
+</html>
