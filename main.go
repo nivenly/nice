@@ -1,28 +1,31 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
-	"database/sql"
-
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/sessions"
+	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"golang.org/x/crypto/ed25519"
+	"database/sql"
 )
 
 var db *sql.DB
 
-// Initialize PostgreSQL connection
 func initDB() {
 	var err error
-	connStr := "postgres://diduser:password@localhost:5432/diddb?sslmode=disable" // Replace with your database connection string
+	connStr := os.Getenv("POSTGRES_URL")
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
@@ -40,20 +43,10 @@ func migrateSchema() {
 			did TEXT UNIQUE NOT NULL,
 			public_key TEXT NOT NULL,
 			private_key TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS attributes (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			did_id UUID REFERENCES dids(id) ON DELETE CASCADE,
-			name TEXT NOT NULL,
-			value TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS signatures (
-			id SERIAL PRIMARY KEY,
-			attribute_id UUID REFERENCES attributes(id) ON DELETE CASCADE,
-			signed_by_did TEXT NOT NULL,
-			signature TEXT NOT NULL,
+			doc JSONB DEFAULT '{}'::jsonb NOT NULL,
+			alias TEXT UNIQUE,
+			password_hash TEXT NOT NULL,
+			name TEXT,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 	}
@@ -63,20 +56,15 @@ func migrateSchema() {
 			log.Fatalf("Failed to execute migration query: %v", err)
 		}
 	}
-
 	log.Println("Database schema migration complete")
 }
 
-
-// Generate UUIDv5 for deterministic DID generation
 func generateUUIDv5(namespace, input string) string {
 	namespaceBytes, _ := hex.DecodeString(namespace)
 	inputBytes := []byte(input)
 
-	hash := sha1.New()
-	hash.Write(namespaceBytes)
-	hash.Write(inputBytes)
-	uuid := hash.Sum(nil)
+	hash := sha256.Sum256(append(namespaceBytes, inputBytes...))
+	uuid := hash[:16]
 
 	uuid[6] = (uuid[6] & 0x0f) | 0x50
 	uuid[8] = (uuid[8] & 0x3f) | 0x80
@@ -89,12 +77,34 @@ func generateUUIDv5(namespace, input string) string {
 		uuid[10:])
 }
 
-// Endpoint to generate a new DID
-func generateDID(c *gin.Context) {
+func registerUser(c *gin.Context) {
+	var req struct {
+		Name     string `json:"name"`
+		Alias    string `json:"alias"`
+		Password string `json:"password"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if req.Password == "" || req.Alias == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Alias and password are required"})
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		log.Printf("Error generating keys: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate keys"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate keys"})
 		return
 	}
 
@@ -102,184 +112,88 @@ func generateDID(c *gin.Context) {
 	uuid := generateUUIDv5("5b6e0c88-6867-598c-a7e1-c4c5d10e9c4a", pubKeyHex)
 	did := fmt.Sprintf("did:nice:%s", uuid)
 
-	_, err = db.Exec(`INSERT INTO dids (did, public_key, private_key, created_at) VALUES ($1, $2, $3, $4)`,
-		did, pubKeyHex, hex.EncodeToString(priv), time.Now())
+	_, err = db.Exec(`
+		INSERT INTO dids (did, public_key, private_key, alias, password_hash, name, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		did, pubKeyHex, hex.EncodeToString(priv), req.Alias, string(passwordHash), req.Name, time.Now())
 	if err != nil {
 		log.Printf("Error inserting DID into database: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save DID to database"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save registration data"})
 		return
 	}
 
-	log.Printf("DID created successfully: %s", did)
+	log.Printf("User registered successfully: %s", did)
 	c.JSON(http.StatusOK, gin.H{
-		"did":         did,
-		"public_key":  pubKeyHex,
-		"private_key": hex.EncodeToString(priv),
+		"did":        did,
+		"public_key": pubKeyHex,
 	})
 }
 
-// Endpoint to sign an attribute
-func signAttribute(c *gin.Context) {
+func userLogin(c *gin.Context) {
 	var req struct {
-		DID          string `json:"did"`
-		TargetDID    string `json:"target_did"`
-		Attribute    string `json:"attribute"`
-		AttributeVal string `json:"attribute_val"`
+		Alias    string `json:"alias"`
+		Password string `json:"password"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("Invalid request: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
 
-	// Validate that the signing DID exists
-	var signerPrivateKey string
-	err := db.QueryRow(`SELECT private_key FROM dids WHERE did = $1`, req.DID).Scan(&signerPrivateKey)
-	if err != nil {
-		log.Printf("Signing DID not found: %s", req.DID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "signing DID not found"})
+	var storedHash, did string
+	err := db.QueryRow(`SELECT password_hash, did FROM dids WHERE alias = $1`, req.Alias).Scan(&storedHash, &did)
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	// Validate that the target DID exists
-	var targetDIDID string
-	err = db.QueryRow(`SELECT id FROM dids WHERE did = $1`, req.TargetDID).Scan(&targetDIDID)
-	if err == sql.ErrNoRows {
-		log.Printf("Target DID not found: %s", req.TargetDID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "target DID not found"})
-		return
-	} else if err != nil {
-		log.Printf("Error querying target DID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "error querying target DID"})
-		return
-	}
+	session := sessions.Default(c)
+	session.Set("did", did)
+	session.Save()
 
-	// Check if the attribute already exists for the target DID
-	var attributeID string
-	err = db.QueryRow(`
-        SELECT id FROM attributes 
-        WHERE did_id = $1 AND name = $2 AND value = $3
-    `, targetDIDID, req.Attribute, req.AttributeVal).Scan(&attributeID)
+	c.JSON(http.StatusOK, gin.H{"message": "Login successful", "did": did})
+}
 
-	if err == sql.ErrNoRows {
-		// If the attribute doesn't exist, insert it
-		err = db.QueryRow(`
-            INSERT INTO attributes (did_id, name, value, created_at) 
-            VALUES ($1, $2, $3, $4) RETURNING id
-        `, targetDIDID, req.Attribute, req.AttributeVal, time.Now()).Scan(&attributeID)
-		if err != nil {
-			log.Printf("Failed to insert attribute: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert attribute"})
+func sessionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := sessions.Default(c)
+		did := session.Get("did")
+		if did == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "You are not logged in"})
+			c.Abort()
 			return
 		}
-	} else if err != nil {
-		log.Printf("Failed to query attribute: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query attribute"})
-		return
+		c.Next()
 	}
-
-	// Generate the signature
-	privKey, _ := hex.DecodeString(signerPrivateKey)
-	message := fmt.Sprintf("%s:%s:%s", req.Attribute, req.AttributeVal, req.TargetDID)
-	signature := ed25519.Sign(privKey, []byte(message))
-	signatureHex := hex.EncodeToString(signature)
-
-	// Store the signature
-	_, err = db.Exec(`
-        INSERT INTO signatures (attribute_id, signed_by_did, signature, created_at)
-        VALUES ($1, $2, $3, $4)
-    `, attributeID, req.DID, signatureHex, time.Now())
-	if err != nil {
-		log.Printf("Failed to store signature: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to store signature"})
-		return
-	}
-
-	log.Printf("Attribute signed: %s:%s by %s (signature: %s)", req.Attribute, req.AttributeVal, req.DID, signatureHex)
-	c.JSON(http.StatusOK, gin.H{
-		"attribute": req.Attribute,
-		"value":     req.AttributeVal,
-		"signed_by": req.DID,
-		"signature": signatureHex,
-	})
 }
-
-func listDIDsAndAttributes(c *gin.Context) {
-	rows, err := db.Query(`
-		SELECT d.did, d.public_key, a.name, a.value, s.signed_by_did, s.signature, s.created_at
-		FROM dids d
-		LEFT JOIN attributes a ON d.id = a.did_id
-		LEFT JOIN signatures s ON a.id = s.attribute_id
-		ORDER BY d.did, a.name, s.created_at
-	`)
-	if err != nil {
-		log.Printf("Error querying DIDs and attributes: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query DIDs and attributes"})
-		return
-	}
-	defer rows.Close()
-
-	results := make(map[string]map[string]interface{})
-	for rows.Next() {
-		var did, publicKey, name, value, signedBy, signature string
-		var createdAt time.Time
-
-		if err := rows.Scan(&did, &publicKey, &name, &value, &signedBy, &signature, &createdAt); err != nil {
-			log.Printf("Error scanning row: %v", err)
-			continue
-		}
-
-		if _, ok := results[did]; !ok {
-			results[did] = map[string]interface{}{
-				"public_key": publicKey,
-				"attributes": []map[string]interface{}{},
-			}
-		}
-
-		if name != "" && value != "" {
-			attributes := results[did]["attributes"].([]map[string]interface{})
-			attributes = append(attributes, map[string]interface{}{
-				"name":      name,
-				"value":     value,
-				"signed_by": signedBy,
-				"signature": signature,
-				"created_at": createdAt.Format(time.RFC3339),
-			})
-			results[did]["attributes"] = attributes
-		}
-	}
-
-	c.JSON(http.StatusOK, results)
-}
-
 
 func main() {
+	_ = godotenv.Load()
 	initDB()
 	migrateSchema()
 
 	r := gin.Default()
+	store := cookie.NewStore([]byte("secret"))
+	r.Use(cors.Default(), sessions.Sessions("my-session", store))
 
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"https://nivenly.nym.st"},
-		AllowMethods:     []string{"GET", "POST"},
-		AllowHeaders:     []string{"Origin", "Content-Type"},
-		AllowCredentials: true,
-	}))
+	// Static files
+	r.StaticFile("/", "./static/index.html")
+	r.StaticFile("/login.html", "./static/login.html")
+	r.StaticFile("/registration.html", "./static/registration.html")
+	r.StaticFile("/dashboard.html", "./static/dashboard.html") // Added this route
 
-	r.POST("/dids", generateDID)
-	r.POST("/attributes/sign", signAttribute)
-	r.GET("/dids", listDIDsAndAttributes)
+	// API routes
+	r.POST("/register", registerUser)
+	r.POST("/login", userLogin)
 
+	// Secure routes
+	secure := r.Group("/secure")
+	secure.Use(sessionMiddleware())
+	secure.GET("/dashboard", func(c *gin.Context) {
+		c.File("./static/dashboard.html") // Serve the dashboard only for logged-in users
+	})
 
-	r.Static("/static", "./static")
-	r.StaticFile("/", "./static/frontend.html")
-	r.StaticFile("/dids.html", "./static/dids.html")
-
-	certFile := "/etc/letsencrypt/live/nivenly.nym.st/fullchain.pem"
-	keyFile := "/etc/letsencrypt/live/nivenly.nym.st/privkey.pem"
 	log.Println("Server running on https://nivenly.nym.st:8080")
-	if err := r.RunTLS(":8080", certFile, keyFile); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
+	r.RunTLS(":8080", os.Getenv("TLS_CERT_PATH"), os.Getenv("TLS_KEY_PATH"))
 }
+

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <script>
+        // Check session storage for DID
+        window.onload = function () {
+            const did = sessionStorage.getItem("did");
+            if (!did) {
+                alert("You are not logged in.");
+                window.location.href = "/login.html";
+            } else {
+                document.getElementById("welcome").textContent = `Welcome, your DID is ${did}`;
+            }
+        };
+    </script>
+</head>
+<body>
+    <h1 id="welcome">Welcome!</h1>
+    <p>This is the dashboard page.</p>
+    <a href="/login.html">Logout</a>
+</body>
+</html>

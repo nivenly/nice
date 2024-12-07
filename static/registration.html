@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        async function register() {
+            const name = document.getElementById("name").value;
+            const alias = document.getElementById("alias").value;
+            const password = document.getElementById("password").value;
+
+            if (!alias || !password) {
+                alert("Alias and password are required.");
+                return;
+            }
+
+            try {
+                const response = await fetch("/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name, alias, password }),
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    alert(`Registration successful! Your DID: ${result.did}`);
+                    window.location.href = "/login.html";
+                } else {
+                    alert(result.error || "Registration failed.");
+                }
+            } catch (error) {
+                console.error("Error registering user:", error);
+                alert("An error occurred during registration.");
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+    <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow-lg">
+        <h1 class="text-2xl font-bold mb-4">Register</h1>
+        <label class="block text-gray-700">Name (Optional):</label>
+        <input id="name" type="text" class="w-full p-2 border rounded mb-4" placeholder="Enter your name" />
+        <label class="block text-gray-700">Alias:</label>
+        <input id="alias" type="text" class="w-full p-2 border rounded mb-4" placeholder="Enter an alias (required)" />
+        <label class="block text-gray-700">Password:</label>
+        <input id="password" type="password" class="w-full p-2 border rounded mb-4" placeholder="Enter a password (required)" />
+        <button onclick="register()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">Register</button>
+        <p class="text-center mt-4">
+            <a href="/login.html" class="text-blue-500 hover:underline">Already have an account? Log in</a>
+        </p>
+    </div>
+</body>
+</html>
